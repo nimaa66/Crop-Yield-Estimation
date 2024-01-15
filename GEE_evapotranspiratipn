@@ -1,0 +1,151 @@
+// var dataset = ee.FeatureCollection('USDOS/LSIB/2017');
+// var styleParams = {
+//   fillColor: 'b5ffb4',
+//   color: '00909F',
+//   width: 3.0,
+// };
+// var countries = dataset.style(styleParams);
+// var geometry = dataset.filterMetadata('COUNTRY_NA','equals','Germany');
+Map.setCenter(10.50, 51.00, 5);
+Map.addLayer(geometry, {}, 'Brandenburg');
+
+//functions for create and apply bit mask
+var bitwiseExtract = function(input, fromBit, toBit) {
+  var maskSize = ee.Number(1).add(toBit).subtract(fromBit)
+  var mask = ee.Number(1).leftShift(maskSize).subtract(1)
+  return input.rightShift(fromBit).bitwiseAnd(mask)
+}
+
+var applyQaMask = function(image) {
+  var ET_MOD = image.select('ET')
+  var QC_ET = image.select('ET_QC')
+  //var deadDetectorMask = QC_ET.bitwiseAnd(1 << 2).eq(0)
+  var cloudStateMask = bitwiseExtract(QC_ET, 3, 4).eq(0)
+  //var confidenceQualityMask = bitwiseExtract(QC_ET, 5, 7).lt(4)
+  var mask = cloudStateMask//.and(deadDetectorMask).and(confidenceQualityMask)
+  return ET_MOD.updateMask(mask)
+}
+
+// ET  masking and visualizzation
+
+var start_day = 182;// July 1
+var end_day = 273;// October 1
+
+var dataset = ee.ImageCollection('MODIS/006/MOD16A2')
+                  .filter(ee.Filter.date('2001-01-01', '2019-12-31'))
+                  .filter(ee.Filter.bounds(geometry))
+                  .filter(ee.Filter.calendarRange(start_day,end_day))
+                  //.map(function(image){return image.clip(geometry)});
+
+// fundtion to add scale factor
+function scale(img){
+  return img.multiply(0.1).copyProperties(img,['system:time_start']);
+}
+
+var evapotranspiration = dataset.select('ET');
+var evapotranspirationScaled = evapotranspiration.map(scale)
+
+// visualization
+var evapotranspirationVis = {
+  min: 0.0,
+  max: 30.0,
+  palette: [
+    'ffffff', 'fcd163', '99b718', '66a000', '3e8601', '207401', '056201',
+    '004c00', '011301'
+  ],
+};
+
+Map.addLayer(evapotranspirationScaled.mean().clip(geometry), evapotranspirationVis, 'Evapotranspiration Original');
+
+
+var ET_Masked = dataset.map(applyQaMask)
+var ET_MaskedScaled = ET_Masked.map(scale)
+//var terraMasked = terraMasked.median()
+Map.addLayer(ET_MaskedScaled.mean().clip(geometry), evapotranspirationVis, 'Evapotranspiration Masked');
+
+print (evapotranspirationScaled)
+print (ET_MaskedScaled)
+
+var chart = ui.Chart.image.series({
+  imageCollection: ET_MaskedScaled, // we need to use a image collection here.
+  region: geometry, 
+  reducer: ee.Reducer.mean(),
+  scale: 500
+}).setOptions({
+      lineWidth: 1,
+      title: 'ET Time Series',
+      interpolateNulls: true,
+      vAxis: {title: 'ET'},
+      hAxis: {title: '', format: 'YYYY-MMM'}
+    })
+print(chart);
+
+//|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+var addMask = function(image) {
+  return image.select('LC_Type1').updateMask(image.eq(12));
+};
+
+// Map the function over the collection and display the result.
+
+var dataset = ee.ImageCollection('MODIS/006/MCD12Q1');
+var igbpLandCover = dataset.select('LC_Type1');
+var igbpLandCoverVis = {
+  min: 1.0,
+  max: 17.0,
+  palette: [
+    '05450a', '086a10', '54a708', '78d203', '009900', 'c6b044', 'dcd159',
+    'dade48', 'fbff13', 'b6ff05', '27ff87', 'c24f44', 'a5a5a5', 'ff6d4c',
+    '69fff8', 'f9ffa4', '1c0dff'
+  ],
+};
+
+var stacked_coll = igbpLandCover.map(addMask)
+print (igbpLandCover.first())
+print(stacked_coll)
+Map.addLayer(stacked_coll.first().clip(geometry), igbpLandCoverVis, 'LC')
+
+// function for ET 
+var typeMaskET_func = function(image){
+  // create a year which will be used to link the crop mask with ndiv
+  var image_year = ee.Date(image.get('system:time_start')).get("year");
+  var crop = stacked_coll // get the crop mask
+    .filterDate(ee.Date.fromYMD(image_year, 1, 1))
+    .first();
+  var temp_image = ee.Image([image,crop]);
+  var temp_mask = temp_image.select("LC_Type1")
+  return temp_image.select("ET").updateMask(temp_mask);
+};
+// apply to ET collection
+var typeMasked_ET = ET_MaskedScaled.map(typeMaskET_func);
+
+Map.addLayer(typeMasked_ET.mean().clip(geometry), evapotranspirationVis, 'ET  type masked');
+print (typeMasked_ET)
+
+//|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+var testTable1 = geometry.limit(1140); // Do this outside map()s and loops.
+print (testTable1)
+
+var dataET = typeMasked_ET.map(function(image) {
+  return image.reduceRegions({
+    collection: testTable1, 
+    reducer: ee.Reducer.mean(), 
+    scale: 500
+  }).map(function(f) {
+    return f.set({
+      time: image.date().millis(),
+      date: image.date().format()
+    })
+  })
+}).flatten()
+print(dataET.size());
+Map.addLayer(dataET, igbpLandCoverVis, 'dataET')
+
+
+Export.table.toDrive({
+  collection: dataET,
+  description: 'dataET',
+  fileFormat: 'CSV'
+});
+
