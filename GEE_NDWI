@@ -1,0 +1,141 @@
+// var dataset = ee.FeatureCollection('USDOS/LSIB/2017');
+// var styleParams = {
+//   fillColor: 'b5ffb4',
+//   color: '00909F',
+//   width: 3.0,
+// };
+// var countries = dataset.style(styleParams);
+// var geometry = dataset.filterMetadata('COUNTRY_NA','equals','Germany');
+Map.setCenter(10.50, 51.00, 5);
+Map.addLayer(geometry, {}, 'Brandenburg');
+
+//maskin functions 
+var maskClouds = function(image) {
+  // Select the QA band.
+  var QA = image.select('StateQA')
+  // Make a mask to get bit 10, the internal_cloud_algorithm_flag bit.
+  var bitMask = 1 << 10;
+  // Return an image masking out cloudy areas.
+  return image.updateMask(QA.bitwiseAnd(bitMask).eq(0))
+}
+
+
+var dataset = ee.ImageCollection('MODIS/061/MOD09A1')
+  .map(maskClouds);
+print (dataset)
+
+var start_day = 182;// May 1
+var end_day = 273;// June 1
+
+var filtered = dataset
+  .filter(ee.Filter.date('2001-01-01', '2019-12-31'))
+  .filter(ee.Filter.bounds(geometry))
+  .filter(ee.Filter.calendarRange(start_day,end_day))
+  //.map(function(image){return image.clip(geometry)});
+print (filtered)
+
+function addNDWI(image) {
+  var ndwi = image.normalizedDifference(['sur_refl_b02', 'sur_refl_b06']).rename('ndwi');
+  return image.addBands(ndwi);
+}
+// Map the function over the collection
+var withNdwi = filtered.map(addNDWI);
+print (withNdwi)
+
+var ndwiVis = {
+  min: -1.0,
+  max: 1.0,
+  palette: [
+    'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901',
+    '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01',
+    '012E01', '011D01', '011301'
+  ],
+};
+Map.addLayer(withNdwi.select('ndwi').mean().clip(geometry), ndwiVis, 'NDWI');
+
+// Display a time-series chart
+// NDWI
+var chart = ui.Chart.image.series({
+  imageCollection: withNdwi.select('ndwi'),
+  region: geometry,
+  reducer: ee.Reducer.mean(),
+  scale: 500
+}).setOptions({
+      lineWidth: 1,
+      title: 'NDWI Time Series',
+      interpolateNulls: true,
+      vAxis: {title: 'NDWI'},
+      hAxis: {title: '', format: 'YYYY-MMM'}
+    })
+print(chart);
+
+//////////////////////////////////////////////////////
+
+var addMask = function(image) {
+  return image.select('LC_Type1').updateMask(image.eq(12));
+};
+
+// Map the function over the collection and display the result.
+
+var dataset = ee.ImageCollection('MODIS/006/MCD12Q1');
+var igbpLandCover = dataset.select('LC_Type1');
+var igbpLandCoverVis = {
+  min: 1.0,
+  max: 17.0,
+  palette: [
+    '05450a', '086a10', '54a708', '78d203', '009900', 'c6b044', 'dcd159',
+    'dade48', 'fbff13', 'b6ff05', '27ff87', 'c24f44', 'a5a5a5', 'ff6d4c',
+    '69fff8', 'f9ffa4', '1c0dff'
+  ],
+};
+
+
+var stacked_coll = igbpLandCover.map(addMask)
+print (igbpLandCover.first())
+print(stacked_coll)
+Map.addLayer(stacked_coll.first().clip(geometry), igbpLandCoverVis, 'LC')
+
+var typeMaskNDWI_func = function(image){
+  // create a year which will be used to link the crop mask with ndwi
+  var image_year = ee.Date(image.get('system:time_start')).get("year");
+  var crop = stacked_coll // get the crop mask
+    .filterDate(ee.Date.fromYMD(image_year, 1, 1))
+    .first();
+  var temp_image = ee.Image([image,crop]);
+  var temp_mask = temp_image.select("LC_Type1")
+  return temp_image.select("ndwi").updateMask(temp_mask);
+};
+// apply to NDWI collection
+var typeMasked_ndwi = withNdwi.map(typeMaskNDWI_func);
+
+Map.addLayer(typeMasked_ndwi.select('ndwi').mean().clip(geometry), ndwiVis, 'NDWI  type masked');
+
+print (typeMasked_ndwi)
+
+////////////////////////////////////////////////////
+
+var featureSizeNDWI = typeMasked_ndwi.size()
+var testTable1 = geometry.limit(1140); // Do this outside map()s and loops.
+print (testTable1)
+
+var dataNDWI = typeMasked_ndwi.map(function(image) {
+  return image.reduceRegions({
+    collection: testTable1, 
+    reducer: ee.Reducer.mean(), 
+    scale: 500
+  }).map(function(f) {
+    return f.set({
+      time: image.date().millis(),
+      date: image.date().format()
+    })
+  })
+}).flatten()
+print(dataNDWI.size());
+Map.addLayer(dataNDWI, igbpLandCoverVis, 'dataNDWI')
+
+
+Export.table.toDrive({
+  collection: dataNDWI,
+  description: 'dataNDWI',
+  fileFormat: 'CSV'
+});
