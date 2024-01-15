@@ -1,0 +1,219 @@
+// var dataset = ee.FeatureCollection('USDOS/LSIB/2017');
+var styleParams = {
+  fillColor: 'b5ffb4',
+  color: '00909F',
+  width: 3.0,
+};
+// var countries = dataset.style(styleParams);
+// var region= dataset.filterMetadata('COUNTRY_NA','equals','Germany');
+Map.setCenter(10.50, 51.00, 5);
+Map.addLayer(region, {}, 'Germany');
+
+var start_day = 121;// July 1
+var end_day = 181;// October 1
+
+var modisLST = ee.ImageCollection("MODIS/006/MOD11A2");
+var terra = modisLST
+  .filter(ee.Filter.date('2001-01-01', '2019-12-31'))
+  .select('LST_Day_1km','QC_Day')
+  //.map(function(image){return image.clip(region)});
+  
+
+// Helper function to extract the values from specific bits
+// The input parameter can be a ee.Number() or ee.Image()
+// Code adapted from https://gis.stackexchange.com/a/349401/5160
+var bitwiseExtract = function(input, fromBit, toBit) {
+  var maskSize = ee.Number(1).add(toBit).subtract(fromBit)
+  var mask = ee.Number(1).leftShift(maskSize).subtract(1)
+  return input.rightShift(fromBit).bitwiseAnd(mask)
+}
+
+// Let's extract all pixels from the input image where
+// Bits 0-1 <= 1 (LST produced of both good and other quality)
+// Bits 2-3 = 0 (Good data quality)
+// Bits 4-5 Ignore, any value is ok
+// Bits 6-7 = 0 (Average LST error ≤ 1K)
+
+// We can wrap this in a function and apply it on the 
+// entire collection to mask all images
+var applyQaMask = function(image) {
+  var lstDay = image.select('LST_Day_1km')
+  var qcDay = image.select('QC_Day')
+  var qaMask = bitwiseExtract(qcDay, 0, 1).lte(1)
+  var dataQualityMask = bitwiseExtract(qcDay, 2, 3).lte(1)
+  var lstErrorMask = bitwiseExtract(qcDay, 6, 7).lte(1)
+  var mask = qaMask.and(dataQualityMask).and(lstErrorMask)
+  return lstDay.updateMask(mask)
+}
+
+var landSurfaceTemperatureVis = {
+  min: -15.0,
+  max: 27.0,
+  palette: [
+    '040274', '040281', '0502a3', '0502b8', '0502ce', '0502e6',
+    '0602ff', '235cb1', '307ef3', '269db1', '30c8e2', '32d3ef',
+    '3be285', '3ff38f', '86e26f', '3ae237', 'b5e22e', 'd6e21f',
+    'fff705', 'ffd611', 'ffb613', 'ff8b13', 'ff6e08', 'ff500d',
+    'ff0000', 'de0101', 'c21301', 'a71001', '911003'
+  ],
+};
+
+// // resampling function
+var resampling = function (image){
+  var imageProj = image.select('LST_Day_1km')
+  return image.resample('bilinear').reproject({
+    crs: imageProj.projection().crs(),
+    scale: 500
+  })
+}
+
+// scaling function
+function scale(img){
+  return img.multiply(0.02)
+  .subtract(273.15)
+  .copyProperties(img,['system:time_start']);
+}
+
+
+// visualization
+var terraOriginal = terra.select('LST_Day_1km').map(scale)
+var terraOriginal_m =terraOriginal.mean()  
+Map.addLayer(terraOriginal_m.clip(region), landSurfaceTemperatureVis, 'LST Oroginal');
+
+var terraMasked = terra.map(applyQaMask)
+var terraMaskedScaled = terraMasked.map(scale)
+var terraMaskedScaled_m = terraMaskedScaled.mean()
+Map.addLayer(terraMaskedScaled_m.clip(region), landSurfaceTemperatureVis, 'LST MaskedScaled');
+
+var terraMaskedScaledResampled = terraMaskedScaled.map(resampling)
+var terraMaskedScaledResampled_m = terraMaskedScaledResampled.mean()
+Map.addLayer(terraMaskedScaledResampled_m.clip(region), landSurfaceTemperatureVis, 'LST MaskedScaledResampled');
+
+print (terraOriginal)
+print (terraMaskedScaled)
+print (terraMaskedScaledResampled)
+
+var LST_Day_Final = terraMaskedScaledResampled
+  .filter(ee.Filter.calendarRange(start_day,end_day))
+print (LST_Day_Final)
+
+// Chart time series of LST 
+var ts1 = ui.Chart.image.series({
+  imageCollection: terraOriginal,
+  region: region,
+  reducer: ee.Reducer.mean(),
+  scale: 1000,
+  xProperty: 'system:time_start'})
+  .setOptions({
+     title: 'Original LST Time Series',
+     vAxis: {title: 'LST Celsius'},
+    hAxis: {title: '', format: 'YYYY-MMM'}});
+print(ts1);
+
+// Chart time series of LST 
+var ts2 = ui.Chart.image.series({
+  imageCollection: terraMaskedScaled,
+  region: region,
+  reducer: ee.Reducer.mean(),
+  scale: 1000,
+  xProperty: 'system:time_start'})
+  .setOptions({
+     title: 'Masked LST Time Series',
+     vAxis: {title: 'LST Celsius'},
+    hAxis: {title: '', format: 'YYYY-MMM'}});
+print(ts2);
+
+// Chart time series of LST 
+var ts3 = ui.Chart.image.series({
+  imageCollection: terraMaskedScaledResampled,
+  region: region,
+  reducer: ee.Reducer.mean(),
+  scale: 500,
+  xProperty: 'system:time_start'})
+  .setOptions({
+     title: 'Masked&Resampled LST Time Series',
+     vAxis: {title: 'LST Celsius'},
+    hAxis: {title: '', format: 'YYYY-MMM'}});
+print(ts3);
+
+//@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+var addMask = function(image) {
+  return image.select('LC_Type1').updateMask(image.eq(12));
+};
+
+// Map the function over the collection and display the result.
+
+var dataset = ee.ImageCollection('MODIS/006/MCD12Q1');
+var igbpLandCover = dataset.select('LC_Type1');
+var igbpLandCoverVis = {
+  min: 1.0,
+  max: 17.0,
+  palette: [
+    '05450a', '086a10', '54a708', '78d203', '009900', 'c6b044', 'dcd159',
+    'dade48', 'fbff13', 'b6ff05', '27ff87', 'c24f44', 'a5a5a5', 'ff6d4c',
+    '69fff8', 'f9ffa4', '1c0dff'
+  ],
+};
+
+var stacked_coll = igbpLandCover.map(addMask)
+print (igbpLandCover)
+print(stacked_coll)
+Map.addLayer(stacked_coll.first().clip(region), igbpLandCoverVis, 'LC')
+
+// function for LST_Day 
+var typeMaskLST_func = function(image){
+  // create a year which will be used to link the crop mask with ndiv
+  var image_year = ee.Date(image.get('system:time_start')).get("year");
+  var crop = stacked_coll // get the crop mask
+    .filterDate(ee.Date.fromYMD(image_year, 1, 1))
+    .first();
+  var temp_image = ee.Image([image,crop]);
+  var temp_mask = temp_image.select("LC_Type1")
+  return temp_image.select("LST_Day_1km").updateMask(temp_mask);
+};
+// apply to LST collection
+var typeMasked_LST = LST_Day_Final.map(typeMaskLST_func);
+
+Map.addLayer(typeMasked_LST.mean().clip(region), landSurfaceTemperatureVis, 'LST_Day  type masked');
+print (typeMasked_LST)
+
+//@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+var testTable1 = region.limit(1140); // Do this outside map()s and loops.
+print (testTable1)
+
+var dataLST_Day = typeMasked_LST.map(function(image) {
+  return image.reduceRegions({
+    collection: testTable1, 
+    reducer: ee.Reducer.mean(), 
+    scale: 500
+  }).map(function(f) {
+    return f.set({
+      time: image.date().millis(),
+      date: image.date().format()
+    })
+  })
+}).flatten()
+print(dataLST_Day.size());
+Map.addLayer(dataLST_Day, igbpLandCoverVis, 'dataLST_Day')
+
+
+Export.table.toDrive({
+  collection: dataLST_Day,
+  description: 'dataLST_Day',
+  fileFormat: 'CSV'
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
